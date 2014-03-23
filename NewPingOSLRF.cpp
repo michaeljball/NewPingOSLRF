@@ -23,23 +23,24 @@ NewPing::NewPing(uint8_t sync_pin, uint8_t zero_pin, uint8_t echo_pin, int max_c
 	_zeroPin = zero_pin;
 	_echoBit = digitalPinToBitMask(echo_pin);       // Get the port register bitmask for the echo pin.
 	_echoPin = echo_pin;
-	_syncOutput = portOutputRegister(digitalPinToPort(sync_pin)); // Get the output port register for the sync pin.
+	_syncInput = portInputRegister(digitalPinToPort(sync_pin)); 	    // Get the input port register for the sync pin.
 	_zeroInput = portInputRegister(digitalPinToPort(zero_pin));         // Get the input port register for the zero pin.
 	_echoInput = portInputRegister(digitalPinToPort(echo_pin));         // Get the input port register for the echo pin.
 
-	_syncMode = (uint8_t *) portModeRegister(digitalPinToPort(sync_pin)); // Get the port mode register for the sync pin.
-
-	_maxEchoTime = min(max_cm_distance, MAX_SENSOR_DISTANCE) * US_ROUNDTRIP_CM + (US_ROUNDTRIP_CM / 2); // Calculate the maximum distance in uS.
-
-#if DISABLE_ONE_PIN == true
-	*_syncMode |= _syncBit; // Set sync pin to output.
-#endif
+//	_maxEchoTime = min(max_cm_distance, MAX_SENSOR_DISTANCE) * US_ROUNDTRIP_CM + (US_ROUNDTRIP_CM / 2); // Calculate the maximum distance in uS.
+	_maxEchoTime = min(max_cm_distance, MAX_SENSOR_DISTANCE) * US_ROUNDTRIP_CM ; // Calculate the 	zeroThresh =  ZERO_THRESHOLD;
+	echoThresh =  RETURN_THRESHOLD;
 
 #if FASTADC
   // set ADC prescale to 16
-  bit_set(ADCSRA,ADPS2) ;
-  bit_clear(ADCSRA,ADPS1) ;
-  bit_clear(ADCSRA,ADPS0) ;
+//  bit_set(ADCSRA,ADPS2) ;
+//  bit_clear(ADCSRA,ADPS1) ;
+//  bit_clear(ADCSRA,ADPS0) ;
+
+  // set ADC prescale to 8
+  bit_clear(ADCSRA,ADPS2) ;
+  bit_set(ADCSRA,ADPS1) ;
+  bit_set(ADCSRA,ADPS0) ;
 #endif
 
 }
@@ -49,24 +50,38 @@ NewPing::NewPing(uint8_t sync_pin, uint8_t zero_pin, uint8_t echo_pin, int max_c
 // Standard ping methods
 // ---------------------------------------------------------------------------
 
-unsigned int NewPing::ping() {
-	if (!ping_sync()) return NO_ECHO;                // Sync a ping, if it returns false, return NO_ECHO to the calling function.
-	//while (*_echoInput & _echoBit)                      // Wait for the ping echo.
-	while (analogRead(_echoPin) < RETURN_THRESHOLD)
-		if (micros() > _max_time) return NO_ECHO;       // Stop the loop and return NO_ECHO (false) if we're beyond the set maximum distance.
-	return (micros() - (_max_time - _maxEchoTime) - 5); // Calculate ping time, 5uS of overhead.
+unsigned long NewPing::ping() {
+  unsigned long echo_rise;
+  unsigned long echo_fall;
+  int ev;
+	echoValue = 0;					 // Reset Max value of Echo for new reading.
+	if (!ping_sync()) return NO_ECHO;                     // Sync a ping, if it returns false, return NO_ECHO.
+	while ((echoValue = analogRead(_echoPin)) < echoThresh)
+	    if (micros() > _max_time) return NO_ECHO;       // Stop the loop and return NO_ECHO (false) 
+							    // if we're beyond the set maximum distance.
+	echo_rise = micros();
+
+	while (ev <= echoValue ) {			   // Get maximum height of pulse...
+		ev = echoValue;
+		echoValue = analogRead(_echoPin);	    
+	}
+	//echo_fall = micros();
+	echoWidth = micros() - echo_rise;   
+
+ 	ping_result = (echo_rise - _syncFall ) ; // Calculate ping time, 5uS of overhead.
+	return (ping_result);		// ping_result is round trip... just send one way value
 }
 
 
 unsigned int NewPing::ping_in() {
-	unsigned int echoTime = NewPing::ping();          // Calls the ping method and returns with the ping echo distance in uS.
-	return (float(echoTime-zeroRise)/syncWidth)*722; // Convert uS to centimeters.
+	unsigned long echoTime = NewPing::ping();      // Calls the ping method and returns with the ping echo distance in uS.
+	return ((echoTime-zeroRise)*722)/syncWidth; // Convert uS to centimeters.
 }
 
 
 unsigned int NewPing::ping_cm() {
-	unsigned int echoTime = NewPing::ping();          // Calls the ping method and returns with the ping echo distance in uS.
-	return (float(echoTime-zeroRise)/syncWidth)*1833; // Convert uS to centimeters.
+	unsigned long echoTime = NewPing::ping();      // Calls the ping method and returns with the ping echo distance in uS.
+	return ((echoTime-zeroRise)*1833)/syncWidth; // Convert uS to centimeters.
 }
 
 
@@ -102,173 +117,48 @@ unsigned int NewPing::ping_median(uint8_t it) {
 // multiplied by the constant 18.33m        D = ((Rt-Zt) / Sp) * 18.33M
 // ---------------------------------------------------------------------------
 
-unsigned int NewPing::sync_width() {		// Calculate the width of the OSLRF01 Sync Pulse
-  unsigned int sync_drop;
-  unsigned int sync_rise;
-	while (*_syncOutput & _syncBit && micros() <= _max_time) {} // Wait for Sync pin to clear.
-//	sync_drop = micros();
-//	while (!(*_syncOutput & _syncBit))                        // Wait for Sync pin to rise.
-//		if (micros() > (_max_time*2)) return 999;         // Something went wrong, abort.
-//	sync_rise = micros();
+unsigned long NewPing::sync_width() {		// Calculate the width of the OSLRF01 Sync Pulse
+  unsigned long sync_drop;
+  unsigned long sync_rise;
+	while (!(*_syncInput & _syncBit)) {}                     // Wait for Sync pin to rise so we can find a start state.
+	while (*_syncInput & _syncBit) {} 			 // Wait for Sync pin to clear.
+	sync_drop = micros();					 // Falling edge time.
+	while (!(*_syncInput & _syncBit)) {}                       // Wait for Sync pin to rise.
+	sync_rise = micros();					 // Rising edge time.
 
-//	return (sync_rise - sync_drop)*2;			  // Count period of low pulse times 2
-	return pulseIn(_syncPin,HIGH)*2;
+	syncWidth = (sync_rise - sync_drop) *2 ;
+	_maxEchoTime = syncWidth *2; 
+	return syncWidth;
 }
 
-unsigned int NewPing::zero_rise() {
-	if (!ping_sync()) return NO_ECHO;                // Sync a ping, if it returns false, return NO_ECHO to the calling function.
-	while (analogRead(_zeroPin) < ZERO_THRESHOLD)
-		if (micros() > _max_time) return NO_ECHO;       // Stop the loop and return NO_ECHO (false) if we're beyond the set maximum distance.
-	return (micros() - (_max_time - _maxEchoTime) - 5); // Calculate ping time, 5uS of overhead.
+
+
+unsigned int NewPing::zero_rise() {		    // Find the start delay of the outgoing pulse for calculations
+	if (!ping_sync()) return NO_ECHO;           // Sync a ping with falling edge of Sync, if it returns false, 
+	while (analogRead(_zeroPin) < zeroThresh) {}
+	return (micros() - _syncFall);
 }
 
 void NewPing::begin(){
-	zeroRise = NewPing::zero_rise();
 	syncWidth = NewPing::sync_width();
+	zeroRise = NewPing::zero_rise();
 }
 
 // ---------------------------------------------------------------------------
 // Standard ping method support functions (not called directly)
 // ---------------------------------------------------------------------------
 
-boolean NewPing::ping_sync() {
+boolean NewPing::ping_sync() {		// Find falling edge of ping sync
 
 	_max_time =  micros() + MAX_SENSOR_DELAY;                  // Set a timeout for the ping to trigger.
-	while (*_syncOutput & _syncBit && micros() <= _max_time) {} // Wait for Sync pin to clear.
-
-// I need to replace analogRead() here, with a more efficient continuous running ADC
-	while(analogRead(_zeroPin) < ZERO_THRESHOLD)
-		if (micros() > _max_time) return false;                // Something went wrong, abort.
-
-	_max_time = micros() + _maxEchoTime; // Ping started, set the timeout.
-	return true;                         // Ping started successfully.
-}
+	while (!(*_syncInput & _syncBit)) {}                      // Wait for Sync pin to rise so we can find a start state.
+	while (*_syncInput & _syncBit && micros() <= _max_time) {} // Wait for Sync pin to clear.
+	if (micros() > _max_time) return false;                   // Something went wrong, abort.
+	_max_time = micros() + _maxEchoTime;                      // Ping started, set the timeout.
+	_syncFall = micros();
+	return true;                                              // Ping started successfully.
+} 
 
 
-// ---------------------------------------------------------------------------
-// Timer interrupt ping methods (won't work with ATmega8 and ATmega128)
-// ---------------------------------------------------------------------------
-
-void NewPing::ping_timer(void (*userFunc)(void)) {
-	if (!ping_sync()) return;         // Trigger a ping, if it returns false, return without starting the echo timer.
-	timer_us(ECHO_TIMER_FREQ, userFunc); // Set ping echo timer check every ECHO_TIMER_FREQ uS.
-}
-
- 
-boolean NewPing::check_timer() {
-	if (micros() > _max_time) { // Outside the timeout limit.
-		timer_stop();           // Disable timer interrupt
-		return false;           // Cancel ping timer.
-	}
-
-// I need to replace analogRead() here, with a more efficient continuous running ADC
-	if (analogRead(_echoPin) > RETURN_THRESHOLD) { // Ping echo received.
-		timer_stop();                // Disable timer interrupt
-		ping_result = (micros() - (_max_time - _maxEchoTime) - 13); // Calculate ping time, 13uS of overhead.
-		return true;                 // Return ping echo true.
-	}
-
-	return false; // Return false because there's no ping echo yet.
-}
 
 
-// ---------------------------------------------------------------------------
-// Timer2/Timer4 interrupt methods (can be used for non-ultrasonic needs)
-// ---------------------------------------------------------------------------
-
-// Variables used for timer functions
-void (*intFunc)();
-void (*intFunc2)();
-unsigned long _ms_cnt_reset;
-volatile unsigned long _ms_cnt;
-
-
-void NewPing::timer_us(unsigned int frequency, void (*userFunc)(void)) {
-	timer_setup();      // Configure the timer interrupt.
-	intFunc = userFunc; // User's function to call when there's a timer event.
-
-#if defined (__AVR_ATmega32U4__) // Use Timer4 for ATmega32U4 (Teensy/Leonardo).
-	OCR4C = min((frequency>>2) - 1, 255); // Every count is 4uS, so divide by 4 (bitwise shift right 2) subtract one, then make sure we don't go over 255 limit.
-	TIMSK4 = (1<<TOIE4);                  // Enable Timer4 interrupt.
-#else
-	OCR2A = min((frequency>>2) - 1, 255); // Every count is 4uS, so divide by 4 (bitwise shift right 2) subtract one, then make sure we don't go over 255 limit.
-	TIMSK2 |= (1<<OCIE2A);                // Enable Timer2 interrupt.
-#endif
-}
-
-
-void NewPing::timer_ms(unsigned long frequency, void (*userFunc)(void)) {
-	timer_setup();                       // Configure the timer interrupt.
-	intFunc = NewPing::timer_ms_cntdwn;  // Timer events are sent here once every ms till user's frequency is reached.
-	intFunc2 = userFunc;                 // User's function to call when user's frequency is reached.
-	_ms_cnt = _ms_cnt_reset = frequency; // Current ms counter and reset value.
-
-#if defined (__AVR_ATmega32U4__) // Use Timer4 for ATmega32U4 (Teensy/Leonardo).
-	OCR4C = 249;         // Every count is 4uS, so 1ms = 250 counts - 1.
-	TIMSK4 = (1<<TOIE4); // Enable Timer4 interrupt.
-#else
-	OCR2A = 249;           // Every count is 4uS, so 1ms = 250 counts - 1.
-	TIMSK2 |= (1<<OCIE2A); // Enable Timer2 interrupt.
-#endif
-}
-
-
-void NewPing::timer_stop() { // Disable timer interrupt.
-#if defined (__AVR_ATmega32U4__) // Use Timer4 for ATmega32U4 (Teensy/Leonardo).
-	TIMSK4 = 0;
-#else
-	TIMSK2 &= ~(1<<OCIE2A);
-#endif
-}
-
-
-// ---------------------------------------------------------------------------
-// Timer2/Timer4 interrupt method support functions (not called directly)
-// ---------------------------------------------------------------------------
-
-void NewPing::timer_setup() {
-#if defined (__AVR_ATmega32U4__) // Use Timer4 for ATmega32U4 (Teensy/Leonardo).
-	timer_stop(); // Disable Timer4 interrupt.
-	TCCR4A = TCCR4C = TCCR4D = TCCR4E = 0;
-	TCCR4B = (1<<CS42) | (1<<CS41) | (1<<CS40) | (1<<PSR4); // Set Timer4 prescaler to 64 (4uS/count, 4uS-1020uS range).
-	TIFR4 = (1<<TOV4);
-	TCNT4 = 0;    // Reset Timer4 counter.
-#else
-	timer_stop();           // Disable Timer2 interrupt.
-	ASSR &= ~(1<<AS2);      // Set clock, not pin.
-	TCCR2A = (1<<WGM21);    // Set Timer2 to CTC mode.
-	TCCR2B = (1<<CS22);     // Set Timer2 prescaler to 64 (4uS/count, 4uS-1020uS range).
-	TCNT2 = 0;              // Reset Timer2 counter.
-#endif
-}
-
-
-void NewPing::timer_ms_cntdwn() {
-	if (!_ms_cnt--) {            // Count down till we reach zero.
-		intFunc2();              // Scheduled time reached, run the main timer event function.
-		_ms_cnt = _ms_cnt_reset; // Reset the ms timer.
-	}
-}
-
-
-#if defined (__AVR_ATmega32U4__) // Use Timer4 for ATmega32U4 (Teensy/Leonardo).
-ISR(TIMER4_OVF_vect) {
-#else
-ISR(TIMER2_COMPA_vect) {
-#endif
-	if(intFunc) intFunc(); // If wrapped function is set, call it.
-}
-
-
-// ---------------------------------------------------------------------------
-// Conversion methods (rounds result to nearest inch or cm).
-// ---------------------------------------------------------------------------
-
-unsigned int NewPing::convert_in(unsigned int echoTime) {
-	return NewPingConvert(echoTime, US_ROUNDTRIP_IN); // Convert uS to inches.
-}
-
-
-unsigned int NewPing::convert_cm(unsigned int echoTime) {
-	return NewPingConvert(echoTime, US_ROUNDTRIP_CM); // Convert uS to centimeters.
-}
